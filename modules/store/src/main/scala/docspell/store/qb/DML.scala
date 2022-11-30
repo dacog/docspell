@@ -20,9 +20,11 @@ object DML extends DoobieMeta {
   def delete(table: TableDef, cond: Condition): ConnectionIO[Int] =
     deleteFragment(table, cond).update.run
 
-  def deleteFragment(table: TableDef, cond: Condition): Fragment =
-    fr"DELETE FROM" ++ FromExprBuilder.buildTable(table) ++ fr" WHERE" ++ ConditionBuilder
-      .build(cond)
+  def deleteFragment(table: TableDef, cond: Condition): Fragment = {
+    val delete = fr"DELETE FROM" ++ FromExprBuilder.buildTable(table)
+    if (cond == Condition.unit) delete
+    else delete ++ fr"WHERE" ++ ConditionBuilder.build(cond)
+  }
 
   def insert(table: TableDef, cols: Nel[Column[_]], values: Fragment): ConnectionIO[Int] =
     insertFragment(table, cols, List(values)).update.run
@@ -76,7 +78,7 @@ object DML extends DoobieMeta {
       setter: Nel[Setter[_]]
   ): Fragment = {
     val condFrag = cond.map(SelectBuilder.cond).getOrElse(Fragment.empty)
-    fr"UPDATE" ++ FromExprBuilder.buildTable(table) ++ fr"SET" ++
+    fr"UPDATE" ++ FromExprBuilder.buildTable(table) ++ fr" SET" ++
       setter
         .map(s => buildSetter(s))
         .reduceLeft(_ ++ comma ++ _) ++

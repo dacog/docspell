@@ -1,14 +1,12 @@
-FROM alpine:3.14
+FROM alpine:3
 
 ARG version=
 ARG joex_url=
 ARG UNO_URL=https://raw.githubusercontent.com/unoconv/unoconv/0.9.0/unoconv
 ARG TARGETPLATFORM
 
-RUN JDKPKG="openjdk11-jre"; \
-    if [[ $TARGETPLATFORM = linux/arm* ]]; then JDKPKG="openjdk8-jre"; fi; \
-    apk update && \
-    apk add --no-cache $JDKPKG \
+RUN apk update && \
+    apk add --no-cache openjdk17-jre \
     tzdata \
     bash \
     curl \
@@ -33,10 +31,11 @@ RUN JDKPKG="openjdk11-jre"; \
     tesseract-ocr-data-heb \
     tesseract-ocr-data-lit \
     tesseract-ocr-data-pol \
+    tesseract-ocr-data-est \
+    tesseract-ocr-data-ukr \
     unpaper \
-    wkhtmltopdf \
+    weasyprint \
     libreoffice \
-    ttf-droid-nonlatin \
     ttf-droid \
     ttf-dejavu \
     ttf-freefont \
@@ -53,13 +52,15 @@ RUN JDKPKG="openjdk11-jre"; \
     qpdf-dev \
     openssl-dev \
     ocrmypdf \
-  && apk add 'zlib=1.2.12-r1' \
   && pip3 install --upgrade pip \
   && pip3 install ocrmypdf \
   && curl -Ls $UNO_URL -o /usr/local/bin/unoconv \
   && chmod +x /usr/local/bin/unoconv \
   && apk del libxml2-dev libxslt-dev zlib-dev g++ python3-dev py3-pip libffi-dev qpdf-dev openssl-dev \
-  && ln -s /usr/bin/python3 /usr/bin/python
+  && ln -nfs /usr/bin/python3 /usr/bin/python
+
+# Special treatment for ocrmypdf. It is broken quite often
+RUN apk add --no-cache py3-setuptools && ocrmypdf --version
 
 WORKDIR /opt
 RUN wget ${joex_url:-https://github.com/eikek/docspell/releases/download/v$version/docspell-joex-$version.zip} && \
@@ -76,7 +77,7 @@ RUN \
 
 COPY joex-entrypoint.sh /opt/joex-entrypoint.sh
 
-ENTRYPOINT ["/opt/joex-entrypoint.sh", "-J-XX:+UseG1GC"]
+ENTRYPOINT ["/opt/joex-entrypoint.sh"]
 EXPOSE 7878
 
 HEALTHCHECK --interval=1m --timeout=10s --retries=2 --start-period=30s \

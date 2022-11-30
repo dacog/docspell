@@ -24,12 +24,12 @@ import doobie.util.Put
 
 object ItemQueryGenerator {
 
-  def apply(today: LocalDate, tables: Tables, coll: Ident)(q: ItemQuery)(implicit
+  def apply(today: LocalDate, tables: Tables, coll: CollectiveId)(q: ItemQuery)(implicit
       PT: Put[Timestamp]
   ): Condition =
     fromExpr(today, tables, coll)(q.expr)
 
-  final def fromExpr(today: LocalDate, tables: Tables, coll: Ident)(
+  final def fromExpr(today: LocalDate, tables: Tables, coll: CollectiveId)(
       expr: Expr
   )(implicit PT: Put[Timestamp]): Condition =
     expr match {
@@ -99,10 +99,6 @@ object ItemQueryGenerator {
         val col = timestampColumn(tables)(attr)
         val noLikeOp = if (op == Operator.Like) Operator.Eq else op
         Condition.CompareFVal(col, makeOp(noLikeOp), dt)
-
-      case Expr.SimpleExpr(op, Property.IntProperty(attr, value)) =>
-        val col = intColumn(tables)(attr)
-        Condition.CompareVal(col, makeOp(op), value)
 
       case Expr.InExpr(attr, values) =>
         val col = stringColumn(tables)(attr)
@@ -217,7 +213,7 @@ object ItemQueryGenerator {
       case Date.Local(date) =>
         date
       case Date.Millis(ms) =>
-        Instant.ofEpochMilli(ms).atZone(Timestamp.UTC).toLocalDate()
+        Instant.ofEpochMilli(ms).atZone(Timestamp.UTC).toLocalDate
       case Date.Today =>
         today
     }
@@ -228,8 +224,6 @@ object ItemQueryGenerator {
         stringColumn(tables)(s).s
       case t: Attr.DateAttr =>
         timestampColumn(tables)(t)
-      case n: Attr.IntAttr =>
-        intColumn(tables)(n).s
     }
 
   private def timestampColumn(tables: Tables)(attr: Attr.DateAttr): SelectExpr =
@@ -260,11 +254,6 @@ object ItemQueryGenerator {
       case Attr.Folder.FolderName        => tables.folder.name
     }
 
-  private def intColumn(tables: Tables)(attr: Attr.IntAttr): Column[Int] =
-    attr match {
-      case Attr.AttachCount => tables.attachCount.num
-    }
-
   private def makeOp(operator: Operator): QOp =
     operator match {
       case Operator.Eq =>
@@ -285,7 +274,7 @@ object ItemQueryGenerator {
 
   private def itemsWithCustomField(
       sel: RCustomField.Table => Condition
-  )(coll: Ident, op: QOp, value: String): Select = {
+  )(coll: CollectiveId, op: QOp, value: String): Select = {
     val cf = RCustomField.as("cf")
     val cfv = RCustomFieldValue.as("cfv")
 

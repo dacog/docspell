@@ -6,10 +6,11 @@
 
 package docspell.backend.auth
 
-import cats.data.{EitherT, OptionT}
+import cats.data.{EitherT, NonEmptyList, OptionT}
 import cats.effect._
 import cats.implicits._
 
+import docspell.backend.PasswordCrypt
 import docspell.backend.auth.Login._
 import docspell.common._
 import docspell.store.Store
@@ -17,7 +18,6 @@ import docspell.store.queries.QLogin
 import docspell.store.records._
 import docspell.totp.{OnetimePassword, Totp}
 
-import org.mindrot.jbcrypt.BCrypt
 import scodec.bits.ByteVector
 
 trait Login[F[_]] {
@@ -43,8 +43,31 @@ object Login {
   case class Config(
       serverSecret: ByteVector,
       sessionValid: Duration,
-      rememberMe: RememberMe
+      rememberMe: RememberMe,
+      onAccountSourceConflict: OnAccountSourceConflict
   )
+
+  sealed trait OnAccountSourceConflict {
+    def name: String
+  }
+  object OnAccountSourceConflict {
+    case object Fail extends OnAccountSourceConflict {
+      val name = "fail"
+    }
+    case object Convert extends OnAccountSourceConflict {
+      val name = "convert"
+    }
+
+    val all: NonEmptyList[OnAccountSourceConflict] =
+      NonEmptyList.of(Fail, Convert)
+
+    def fromString(str: String): Either[String, OnAccountSourceConflict] =
+      all
+        .find(_.name.equalsIgnoreCase(str))
+        .toRight(
+          s"Invalid on-account-source-conflict value: $str. Use one of ${all.toList.mkString(", ")}"
+        )
+  }
 
   case class RememberMe(enabled: Boolean, valid: Duration) {
     val disabled = !enabled
@@ -73,8 +96,13 @@ object Login {
     case object InvalidAuth extends Result {
       val toEither = Left("Authentication failed.")
     }
+    case class InvalidAccountSource(account: AccountId) extends Result {
+      val toEither = Left(
+        s"The account '${account.asString}' already exists from a different source (local vs openid)!"
+      )
+    }
     case object InvalidTime extends Result {
-      val toEither = Left("Authentication failed.")
+      val toEither = Left("Authentication failed due expired authenticator.")
     }
     case object InvalidFactor extends Result {
       val toEither = Left("Authentication requires second factor.")
@@ -85,6 +113,7 @@ object Login {
     def invalidAuth: Result = InvalidAuth
     def invalidTime: Result = InvalidTime
     def invalidFactor: Result = InvalidFactor
+    def invalidAccountSource(account: AccountId): Result = InvalidAccountSource(account)
   }
 
   def apply[F[_]: Async](store: Store[F], totp: Totp): Resource[F, Login[F]] =
@@ -96,10 +125,32 @@ object Login {
         for {
           data <- store.transact(QLogin.findUser(accountId))
           _ <- logF.trace(s"Account lookup: $data")
-          res <-
-            if (data.exists(checkNoPassword(_, Set(AccountSource.OpenId))))
-              doLogin(config, accountId, false)
-            else Result.invalidAuth.pure[F]
+          res <- data match {
+            case Some(d) if checkNoPassword(d, Set(AccountSource.OpenId)) =>
+              doLogin(config, d.account, false)
+            case Some(d) if checkNoPassword(d, Set(AccountSource.Local)) =>
+              config.onAccountSourceConflict match {
+                case OnAccountSourceConflict.Fail =>
+                  Result.invalidAccountSource(accountId).pure[F]
+                case OnAccountSourceConflict.Convert =>
+                  for {
+                    _ <- logF.debug(
+                      s"Converting account ${d.account.asString} from Local to OpenId!"
+                    )
+                    _ <- store
+                      .transact(
+                        RUser.updateSource(
+                          d.account.userId,
+                          d.account.collectiveId,
+                          AccountSource.OpenId
+                        )
+                      )
+                    res <- doLogin(config, d.account, false)
+                  } yield res
+              }
+            case _ =>
+              Result.invalidAuth.pure[F]
+          }
         } yield res
 
       def loginSession(config: Config)(sessionKey: String): F[Result] =
@@ -122,9 +173,35 @@ object Login {
             for {
               data <- store.transact(QLogin.findUser(acc))
               _ <- logF.trace(s"Account lookup: $data")
-              res <-
-                if (data.exists(check(up.pass))) doLogin(config, acc, up.rememberMe)
-                else Result.invalidAuth.pure[F]
+              res <- data match {
+                case Some(d) if check(up.pass)(d, Set(AccountSource.Local)) =>
+                  doLogin(config, d.account, up.rememberMe)
+                case Some(d) if check(up.pass)(d, Set(AccountSource.OpenId)) =>
+                  config.onAccountSourceConflict match {
+                    case OnAccountSourceConflict.Fail =>
+                      logF.info(
+                        s"Fail authentication because of account source mismatch (local vs openid)."
+                      ) *>
+                        Result.invalidAccountSource(d.account.asAccountId).pure[F]
+                    case OnAccountSourceConflict.Convert =>
+                      for {
+                        _ <- logF.debug(
+                          s"Converting account ${d.account.asString} from OpenId to Local!"
+                        )
+                        _ <- store
+                          .transact(
+                            RUser.updateSource(
+                              d.account.userId,
+                              d.account.collectiveId,
+                              AccountSource.Local
+                            )
+                          )
+                        res <- doLogin(config, d.account, up.rememberMe)
+                      } yield res
+                  }
+                case _ =>
+                  Result.invalidAuth.pure[F]
+              }
             } yield res
           case Left(_) =>
             logF.info(s"User authentication failed for: ${up.hidePass}") *>
@@ -162,7 +239,7 @@ object Login {
         (for {
           _ <- validateToken
           key <- EitherT.fromOptionF(
-            store.transact(RTotp.findEnabledByLogin(sf.token.account, true)),
+            store.transact(RTotp.findEnabledByUserId(sf.token.account.userId, true)),
             Result.invalidAuth
           )
           now <- EitherT.right[Result](Timestamp.current[F])
@@ -175,13 +252,13 @@ object Login {
       }
 
       def loginRememberMe(config: Config)(token: String): F[Result] = {
-        def okResult(acc: AccountId) =
+        def okResult(acc: AccountInfo) =
           for {
             _ <- store.transact(RUser.updateLogin(acc))
             token <- AuthToken.user(acc, false, config.serverSecret, None)
           } yield Result.ok(token, None)
 
-        def doLogin(rid: Ident) =
+        def rememberedLogin(rid: Ident) =
           (for {
             now <- OptionT.liftF(Timestamp.current[F])
             minTime = now - config.rememberMe.valid
@@ -214,7 +291,7 @@ object Login {
               else if (rt.isExpired(config.rememberMe.valid))
                 logF.info(s"RememberMe cookie expired ($rt).") *> Result.invalidTime
                   .pure[F]
-              else doLogin(rt.rememberId)
+              else rememberedLogin(rt.rememberId)
             case Left(err) =>
               logF.info(s"RememberMe cookie was invalid: $err") *> Result.invalidAuth
                 .pure[F]
@@ -245,11 +322,11 @@ object Login {
 
       private def doLogin(
           config: Config,
-          acc: AccountId,
+          acc: AccountInfo,
           rememberMe: Boolean
       ): F[Result] =
         for {
-          require2FA <- store.transact(RTotp.isEnabled(acc))
+          require2FA <- store.transact(RTotp.isEnabled(acc.userId))
           _ <-
             if (require2FA) ().pure[F]
             else store.transact(RUser.updateLogin(acc))
@@ -263,20 +340,20 @@ object Login {
 
       private def insertRememberToken(
           store: Store[F],
-          acc: AccountId,
+          acc: AccountInfo,
           config: Config
       ): F[RememberToken] =
         for {
-          uid <- OptionT(store.transact(RUser.findIdByAccount(acc)))
-            .getOrRaise(new IllegalStateException(s"No user_id found for account: $acc"))
-          rme <- RRememberMe.generate[F](uid)
+          rme <- RRememberMe.generate[F](acc.userId)
           _ <- store.transact(RRememberMe.insert(rme))
           token <- RememberToken.user(rme.id, config.serverSecret)
         } yield token
 
-      private def check(givenPass: String)(data: QLogin.Data): Boolean = {
-        val passOk = BCrypt.checkpw(givenPass, data.password.pass)
-        checkNoPassword(data, Set(AccountSource.Local)) && passOk
+      private def check(
+          givenPass: String
+      )(data: QLogin.Data, expectedSources: Set[AccountSource]): Boolean = {
+        val passOk = PasswordCrypt.check(Password(givenPass), data.password)
+        checkNoPassword(data, expectedSources) && passOk
       }
 
       def checkNoPassword(
