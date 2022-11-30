@@ -1,4 +1,4 @@
-FROM alpine:3
+FROM surnet/alpine-wkhtmltopdf:3.16.2-0.12.6-full
 
 ARG version=
 ARG joex_url=
