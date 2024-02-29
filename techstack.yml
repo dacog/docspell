@@ -2,7 +2,7 @@ repo_name: dacog/docspell
 report_id: 9b2cff1e3b0177cca5b5a29e7c82a158
 version: 0.1
 repo_type: Public
-timestamp: '2024-01-24T06:38:51+00:00'
+timestamp: '2024-02-29T19:37:33+00:00'
 requested_by: mergify[bot]
 provider: github
 branch: master
@@ -184,7 +184,7 @@ tools:
   last_updated_by: renovate[bot]
   last_updated_on: 2022-10-21 14:26:36.000000000 Z
 - name: Nix
-  description: 'A package manager for Linux and other Unix systems '
+  description: A package manager for Linux and other Unix systems
   website_url: http://nixos.org/nix
   license: LGPL-2.1
   open_source: true
